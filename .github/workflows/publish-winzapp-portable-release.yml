@@ -1,0 +1,63 @@
+name: Publish WinZapp Portable Release
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/publish-winzapp-portable-release.yml'
+      - 'winzapp-linux/PUBLISH_PORTABLE_TRIGGER.txt'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: '33401808020'
+      TAG: 'winzapp-linux-portable-test-20260831'
+      ARCHIVE: 'WinZapp-Linux-Portable-amd64.tar.xz'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download portable archive parts
+        run: |
+          set -euo pipefail
+          mkdir -p parts/00 parts/01 parts/02 parts/03
+          gh run download "$SOURCE_RUN" -R "$GITHUB_REPOSITORY" -n winzapp-portable-part00 -D parts/00
+          gh run download "$SOURCE_RUN" -R "$GITHUB_REPOSITORY" -n winzapp-portable-part01 -D parts/01
+          gh run download "$SOURCE_RUN" -R "$GITHUB_REPOSITORY" -n winzapp-portable-part02 -D parts/02
+          gh run download "$SOURCE_RUN" -R "$GITHUB_REPOSITORY" -n winzapp-portable-part03 -D parts/03
+          find parts -maxdepth 2 -type f -ls
+
+      - name: Reassemble and verify complete archive
+        run: |
+          set -euo pipefail
+          cat \
+            parts/00/*.part00 \
+            parts/01/*.part01 \
+            parts/02/*.part02 \
+            parts/03/*.part03 \
+            > "$ARCHIVE"
+          cp parts/00/original.sha256 "$ARCHIVE.sha256"
+          sha256sum -c "$ARCHIVE.sha256"
+          tar -tJf "$ARCHIVE" | head -40
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Publish single-file GitHub Release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" -R "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
+              -R "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title 'WinZapp Linux Portable - Teste' \
+              --notes 'Versão portátil para Linux. Não instala atalhos nem adiciona entrada ao menu do GNOME. Extraia o arquivo e execute ./WinZapp. Os logs são gravados na mesma pasta do executável.'
+          fi
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json url,assets

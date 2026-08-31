@@ -45,7 +45,8 @@ jobs:
             > "$ARCHIVE"
           cp parts/00/original.sha256 "$ARCHIVE.sha256"
           sha256sum -c "$ARCHIVE.sha256"
-          tar -tJf "$ARCHIVE" | head -40
+          tar -tJf "$ARCHIVE" > archive-list.txt
+          head -40 archive-list.txt
           ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
 
       - name: Publish single-file GitHub Release

@@ -1,0 +1,75 @@
+name: Split WinZapp Linux Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/split-winzapp-artifact.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  split:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_ARTIFACT_ID: '9747876332'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download completed WinZapp artifact
+        run: |
+          gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SOURCE_ARTIFACT_ID}/zip" \
+            > /tmp/winzapp-artifact.zip
+          mkdir -p /tmp/winzapp-artifact
+          unzip -q /tmp/winzapp-artifact.zip -d /tmp/winzapp-artifact
+          find /tmp/winzapp-artifact -maxdepth 2 -type f -ls
+
+      - name: Split DEB into connector-sized pieces
+        run: |
+          DEB="$(find /tmp/winzapp-artifact -type f -name '*.deb' | head -1)"
+          test -n "$DEB"
+          mkdir -p split
+          BASENAME="$(basename "$DEB")"
+          printf '%s\n' "$BASENAME" > split/filename.txt
+          cp "${DEB}.sha256" split/original.sha256 2>/dev/null || \
+            find /tmp/winzapp-artifact -type f -name '*.sha256' -exec cp {} split/original.sha256 \;
+          split -b 200M --numeric-suffixes=0 --suffix-length=2 "$DEB" "split/${BASENAME}.part"
+          sha256sum split/*.part* > split/parts.sha256
+          ls -lh split
+
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-deb-part00
+          path: |
+            split/*.part00
+            split/filename.txt
+            split/original.sha256
+            split/parts.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-deb-part01
+          path: split/*.part01
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-deb-part02
+          path: split/*.part02
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14

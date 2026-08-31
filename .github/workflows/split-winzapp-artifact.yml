@@ -1,5 +1,6 @@
 name: Split WinZapp Linux Artifact
 
+# Triggered after the large complete DEB has already been built.
 on:
   workflow_dispatch:
   push:

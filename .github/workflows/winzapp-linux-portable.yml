@@ -1,0 +1,171 @@
+name: Build WinZapp Linux Portable
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'winzapp-linux/portable_*'
+      - 'winzapp-linux/PORTABLE_TRIGGER.txt'
+      - '.github/workflows/winzapp-linux-portable.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Ubuntu 24.04 amd64 portable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Linux build libraries
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates curl xz-utils file binutils patchelf \
+            python3 python3-dev python3-venv python3-pip python3-wxgtk4.0 python3-pyaudio \
+            build-essential pkg-config portaudio19-dev libsndfile1-dev libasound2-dev \
+            libgtk-3-dev libglib2.0-dev libnotify-dev libdbus-1-dev \
+            libnss3 libgbm1 libx11-6 libx11-xcb1 libxss1 libxkbcommon0 \
+            libxcomposite1 libxdamage1 libxrandr2 libdrm2 libatk-bridge2.0-0 \
+            libcups2 libpango-1.0-0 libpangocairo-1.0-0 libxtst6 ffmpeg
+
+      - name: Prepare portable build script
+        run: |
+          cp winzapp-linux/build_winzapp_deb.sh /tmp/build_winzapp_portable.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/build_winzapp_portable.sh')
+          s = p.read_text(encoding='utf-8')
+
+          # Reuse the proven Linux build, but apply the GTK accessibility guard.
+          needle = 'python3 "$PATCHER" "$SRC"\n'
+          repl = needle + 'python3 "$ROOT/winzapp-linux/linux_accessibility_patch.py" "$SRC"\n'
+          if needle not in s:
+              raise SystemExit('phase1 invocation not found')
+          s = s.replace(needle, repl, 1)
+
+          # Put the Puppeteer browser in the location the runtime checks first.
+          old_cache = 'if [[ -d "$PUPPETEER_CACHE" ]]; then rm -rf "$APPDIR/puppeteer-cache"; cp -a "$PUPPETEER_CACHE" "$APPDIR/puppeteer-cache"; fi'
+          new_cache = 'if [[ -d "$PUPPETEER_CACHE" ]]; then rm -rf "$APPDIR/puppeteer-cache" "$APPDIR/api/.cache"; cp -a "$PUPPETEER_CACHE" "$APPDIR/puppeteer-cache"; mkdir -p "$APPDIR/api/.cache"; cp -a "$PUPPETEER_CACHE/." "$APPDIR/api/.cache/"; fi'
+          if old_cache not in s:
+              raise SystemExit('Puppeteer cache copy block not found')
+          s = s.replace(old_cache, new_cache, 1)
+
+          # After the base script writes app_paths.py and linux_diagnostics.py,
+          # convert them to fully portable paths before creating the venv/PyInstaller build.
+          marker = 'PY\n\nstep "Create build venv using distro wxGTK and PyAudio"'
+          inserted = '''PY\npython3 "$ROOT/winzapp-linux/portable_after_patch.py" "$SRC" "$ROOT/winzapp-linux/portable_diagnostics.py"\n\nstep "Create build venv using distro wxGTK and PyAudio"'''
+          if marker not in s:
+              raise SystemExit('post-patch insertion marker not found')
+          s = s.replace(marker, inserted, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+          chmod +x /tmp/build_winzapp_portable.sh
+
+      - name: Compile WinZapp portable executable
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+        run: |
+          /tmp/build_winzapp_portable.sh
+
+      - name: Assemble portable folder without desktop integration
+        run: |
+          set -euo pipefail
+          rm -rf portable-stage portable-out
+          mkdir -p portable-stage portable-out
+          DEB="$(find out -maxdepth 1 -name '*.deb' -type f | head -1)"
+          test -n "$DEB"
+          dpkg-deb -x "$DEB" portable-stage
+          test -x portable-stage/opt/winzapp/WinZapp
+          mv portable-stage/opt/winzapp portable-out/WinZapp-Linux-Portable
+          find portable-out/WinZapp-Linux-Portable -name '*.desktop' -delete
+
+          cat > portable-out/WinZapp-Linux-Portable/LEIA-ME.txt <<'EOF'
+          WinZapp Linux Portable
+
+          Execute diretamente o arquivo: ./WinZapp
+          Esta versão não instala atalhos e não adiciona nada ao menu de aplicativos.
+
+          Os logs são gravados nesta mesma pasta:
+          - session-AAAAmmdd-HHMMSS.log
+          - python.log
+          - crash.log
+
+          Os dados graváveis do WinZapp também permanecem nesta pasta para manter o modo portátil.
+          EOF
+
+          chmod 0755 portable-out/WinZapp-Linux-Portable/WinZapp
+          test ! -e portable-out/WinZapp-Linux-Portable/usr/share/applications/winzapp.desktop
+
+          tar -C portable-out -cJf WinZapp-Linux-Portable-amd64.tar.xz WinZapp-Linux-Portable
+          sha256sum WinZapp-Linux-Portable-amd64.tar.xz > WinZapp-Linux-Portable-amd64.tar.xz.sha256
+          ls -lh WinZapp-Linux-Portable-amd64.tar.xz
+          du -sh portable-out/WinZapp-Linux-Portable
+
+      - name: Split portable archive for transfer
+        run: |
+          mkdir -p portable-parts
+          cp WinZapp-Linux-Portable-amd64.tar.xz.sha256 portable-parts/original.sha256
+          split -b 150M --numeric-suffixes=0 --suffix-length=2 \
+            WinZapp-Linux-Portable-amd64.tar.xz \
+            portable-parts/WinZapp-Linux-Portable-amd64.tar.xz.part
+          sha256sum portable-parts/*.part* > portable-parts/parts.sha256
+          ls -lh portable-parts
+
+      - name: Upload portable part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-portable-part00
+          path: |
+            portable-parts/*.part00
+            portable-parts/original.sha256
+            portable-parts/parts.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload portable part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-portable-part01
+          path: portable-parts/*.part01
+          compression-level: 0
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload portable part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-portable-part02
+          path: portable-parts/*.part02
+          compression-level: 0
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload portable part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-portable-part03
+          path: portable-parts/*.part03
+          compression-level: 0
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload portable part 04
+        uses: actions/upload-artifact@v4
+        with:
+          name: winzapp-portable-part04
+          path: portable-parts/*.part04
+          compression-level: 0
+          if-no-files-found: ignore
+          retention-days: 14

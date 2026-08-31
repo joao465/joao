@@ -38,12 +38,57 @@ jobs:
             libcups2 libpango-1.0-0 libpangocairo-1.0-0 libxtst6 \
             ffmpeg xvfb
 
-      - name: Build complete DEB
+      - name: Prepare Linux v2 build script
+        run: |
+          cp winzapp-linux/build_winzapp_deb.sh /tmp/build_winzapp_deb_v2.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/build_winzapp_deb_v2.sh')
+          s = p.read_text(encoding='utf-8')
+
+          needle = 'python3 "$PATCHER" "$SRC"\n'
+          repl = needle + 'python3 "$ROOT/winzapp-linux/linux_accessibility_patch.py" "$SRC"\n'
+          if needle not in s:
+              raise SystemExit('phase1 invocation not found')
+          s = s.replace(needle, repl, 1)
+
+          old_cache = 'if [[ -d "$PUPPETEER_CACHE" ]]; then rm -rf "$APPDIR/puppeteer-cache"; cp -a "$PUPPETEER_CACHE" "$APPDIR/puppeteer-cache"; fi'
+          new_cache = 'if [[ -d "$PUPPETEER_CACHE" ]]; then rm -rf "$APPDIR/puppeteer-cache" "$APPDIR/api/.cache"; cp -a "$PUPPETEER_CACHE" "$APPDIR/puppeteer-cache"; mkdir -p "$APPDIR/api/.cache"; cp -a "$PUPPETEER_CACHE/." "$APPDIR/api/.cache/"; fi'
+          if old_cache not in s:
+              raise SystemExit('Puppeteer cache copy block not found')
+          s = s.replace(old_cache, new_cache, 1)
+
+          s = s.replace('PUPPETEER_CACHE_DIR="$APP/puppeteer-cache"', 'PUPPETEER_CACHE_DIR="$APP/api/.cache"')
+          s = s.replace("+ '-linux1'", "+ '-linux2'")
+          p.write_text(s, encoding='utf-8')
+          PY
+          chmod +x /tmp/build_winzapp_deb_v2.sh
+
+      - name: Build complete DEB v2
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: '1'
         run: |
-          chmod +x winzapp-linux/build_winzapp_deb.sh
-          ./winzapp-linux/build_winzapp_deb.sh
+          /tmp/build_winzapp_deb_v2.sh
+
+      - name: Add unique packaged launcher
+        run: |
+          DEB="$(find out -maxdepth 1 -name '*.deb' -type f | head -1)"
+          test -n "$DEB"
+          rm -rf repack out-v2
+          mkdir -p repack out-v2
+          dpkg-deb -R "$DEB" repack
+          cp repack/usr/bin/winzapp repack/usr/bin/winzapp-packaged
+          chmod 0755 repack/usr/bin/winzapp-packaged
+          sed -i 's|^Name=WinZapp$|Name=WinZapp Linux Completo|' repack/usr/share/applications/winzapp.desktop
+          sed -i 's|^Exec=/usr/bin/winzapp$|Exec=/usr/bin/winzapp-packaged|' repack/usr/share/applications/winzapp.desktop
+          chmod 0755 repack/DEBIAN repack/DEBIAN/postinst
+          VERSION="$(awk -F': ' '/^Version:/{print $2}' repack/DEBIAN/control)"
+          ARCH="$(awk -F': ' '/^Architecture:/{print $2}' repack/DEBIAN/control)"
+          OUTDEB="out-v2/winzapp_${VERSION}_${ARCH}.deb"
+          dpkg-deb -Zxz -z6 --root-owner-group --build repack "$OUTDEB"
+          sha256sum "$OUTDEB" > "$OUTDEB.sha256"
+          rm -rf out
+          mv out-v2 out
 
       - name: Show package size
         if: always()
@@ -55,7 +100,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: winzapp-linux-deb
+          name: winzapp-linux-deb-v2
           path: |
             out/*.deb
             out/*.sha256
